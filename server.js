@@ -7,14 +7,17 @@ const app = express();
 app.use(cors());
 
 const PORT = process.env.PORT || 7000;
-const DOMAIN = 'https://doramasyt.com';
+const DOMAIN = 'https://www.doramasyt.com';
 
-// 1. Manifiesto Obligatorio para Stremio y Kino TV
+const headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+};
+
 const manifest = {
     id: 'org.doramasyt.addon',
-    version: '1.0.0',
-    name: 'DoramasYT Addon',
-    description: 'Ver Doramas online gratis en HD con subtítulos en español.',
+    version: '1.1.0',
+    name: 'DoramasYT Completo',
+    description: 'Buscador y reproductor integrado de DoramasYT.',
     resources: ['catalog', 'meta', 'stream'],
     types: ['series', 'movie'],
     idPrefixes: ['dyt_'],
@@ -22,114 +25,134 @@ const manifest = {
         {
             type: 'series',
             id: 'doramas_recientes',
-            name: 'Doramas Recientes'
+            name: 'Doramas Recientes',
+            extra: [{ name: 'search', required: false }] // ESTO ACTIVA LA BÚSQUEDA EN STREMIO
         }
     ]
 };
 
-app.get('/manifest.json', (req, res) => {
-    res.json(manifest);
-});
+app.get('/manifest.json', (req, res) => res.json(manifest));
 
-// 2. Endpoint del Catálogo (Muestra los últimos doramas de la web)
-app.get('/catalog/:type/:id.json', async (req, res) => {
-    const { type, id } = req.params;
-    
-    if (id !== 'doramas_recientes') return res.json({ metas: [] });
+// 1. CONTROLADOR DEL CATÁLOGO + BUSCADOR INTEGRADO
+app.get('/catalog/:type/:id/:extra?.json', async (req, res) => {
+    const { id, extra } = req.params;
+    let searchQueries = '';
+
+    // Detectar si el usuario usó la barra de búsqueda
+    if (extra) {
+        const params = new URLSearchParams(extra);
+        searchQueries = params.get('search');
+    }
 
     try {
-        const response = await axios.get(DOMAIN, {
-            headers: { 'User-Agent': 'Mozilla/5.0' }
-        });
+        let targetUrl = DOMAIN;
+        // Si hay una búsqueda, usamos la URL de búsqueda de la web
+        if (searchQueries) {
+            targetUrl = `${DOMAIN}/buscar?q=${encodeURIComponent(searchQueries)}`;
+        }
+
+        const response = await axios.get(targetUrl, { headers });
         const $ = cheerio.load(response.data);
         const metas = [];
 
-        // Extraemos las series recientes según el HTML de DoramasYT
+        // Scraper dinámico que lee tanto la portada como los resultados de búsqueda
         $('h3').each((i, el) => {
             const title = $(el).text().trim();
-            const linkTag = $(el).prev('a').attr('href') || $(el).find('a').attr('href');
+            const linkTag = $(el).prev('a').attr('href') || $(el).find('a').attr('href') || $(el).closest('a').attr('href');
             
-            if (linkTag && linkTag.includes('capitulo')) {
-                // Generamos un ID único simulado basado en la URL limpia
-                const cleanId = linkTag.replace('/ver/', '').split('-capitulo')[0];
-                
+            if (linkTag && (linkTag.includes('/ver/') || linkTag.includes('/dorama/'))) {
+                const cleanSlug = linkTag.replace('/ver/', '').replace('/dorama/', '');
                 metas.push({
-                    id: `dyt_${cleanId}`,
+                    id: `dyt_${cleanSlug}`,
                     type: 'series',
                     name: title,
-                    poster: 'https://placeholder.com', // URL del poster si está disponible en el HTML
-                    description: 'Capítulo reciente en DoramasYT'
+                    poster: 'https://placeholders.dev',
+                    description: `Contenido disponible en DoramasYT`
                 });
             }
         });
 
-        // Eliminar duplicados de series por ID
+        // Filtrar duplicados
         const uniqueMetas = Array.from(new Map(metas.map(item => [item.id, item])).values());
         res.json({ metas: uniqueMetas });
 
     } catch (error) {
-        console.error(error);
         res.json({ metas: [] });
     }
 });
 
-// 3. Endpoint de Meta (Detalles del dorama y lista de capítulos)
+// 2. CONTROLADOR DE METADATOS (Temporadas y Episodios)
 app.get('/meta/:type/:id.json', async (req, res) => {
     const { id } = req.params;
     const cleanSlug = id.replace('dyt_', '');
 
-    // Simulación de la estructura de temporadas/episodios para el reproductor
-    res.json({
-        meta: {
-            id: id,
-            type: 'series',
-            name: cleanSlug.replace(/-/g, ' '),
-            genres: ['Romance', 'Drama'],
-            videos: [
-                {
-                    id: `${id}:1`,
-                    season: 1,
-                    episode: 1,
-                    title: "Capítulo 1",
-                    released: new Date().toISOString()
-                }
-            ]
+    try {
+        // Simulamos un listado dinámico de episodios basados en el slug.
+        // En una actualización futura se puede scrapear la página interna del dorama para listar del 1 al final.
+        const videos = [];
+        for (let i = 1; i <= 24; i++) {
+            videos.push({
+                id: `${id}:${i}`,
+                season: 1,
+                episode: i,
+                title: `Capítulo ${i}`
+            });
         }
-    });
+
+        res.json({
+            meta: {
+                id: id,
+                type: 'series',
+                name: cleanSlug.replace(/-/g, ' ').toUpperCase(),
+                genres: ['K-Drama', 'Romance'],
+                videos: videos
+            }
+        });
+    } catch (e) {
+        res.json({ meta: {} });
+    }
 });
 
-// 4. Endpoint de Streams (Los enlaces directos de video)
+// 3. EXTRACTOR DE ENLACES DE VIDEO (Los streams que lee el reproductor)
 app.get('/stream/:type/:id.json', async (req, res) => {
-    const { id } = req.params; // Ejemplo: dyt_nombre-dorama:1
-    const cleanSlug = id.split(':')[0].replace('dyt_', '');
-    const episodeNum = id.split(':')[1] || '1';
+    const { id } = req.params; 
+    
+    // Convertimos el ID de Stremio (ej: dyt_nombre-dorama:1) en la URL real del capítulo
+    const parts = id.replace('dyt_', '').split(':');
+    const slug = parts[0];
+    const episodeNum = parts[1] || '1';
 
-    // Generamos la URL real del capítulo en DoramasYT
-    const targetUrl = `${DOMAIN}/ver/${cleanSlug}-capitulo-${episodeNum}`;
+    // Intentamos estructurar la URL estándar de reproducción del sitio
+    const targetUrl = `${DOMAIN}/ver/${slug}-capitulo-${episodeNum}`;
 
     try {
-        const response = await axios.get(targetUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+        const response = await axios.get(targetUrl, { headers });
         const $ = cheerio.load(response.data);
-        
         const streams = [];
 
-        // BUSCAR REPRODUCTORES INTEGRADOS (IFRAMES)
-        // Buscamos las etiquetas iframe de servidores como Fembed, Mega, Okru, etc.
+        // Buscador de reproductores incrustados en el HTML (Servidores de video externos)
         $('iframe').each((i, el) => {
             let src = $(el).attr('src');
             if (src) {
                 if (src.startsWith('//')) src = 'https:' + src;
+                
+                // Clasificamos el nombre del servidor para que el usuario sepa cuál elegir
+                let serverName = "Servidor Alternativo";
+                if (src.includes('ok.ru')) serverName = "OkRu (Directo)";
+                if (src.includes('fembed') || src.includes('feurl')) serverName = "Fembed HD";
+                if (src.includes('mega.nz')) serverName = "Mega Cloud";
+
                 streams.push({
-                    title: `Servidor Alternativo ${i + 1}`,
-                    externalUrl: src // Abre el video externamente o a través de la interfaz del addon
+                    title: `DoramasYT - ${serverName}`,
+                    externalUrl: src // Pasa la URL del reproductor directo a Stremio
                 });
             }
         });
 
-        // En caso de que no haya streams directos extraídos por falta de un desincrustador avanzado (URL Resolver):
+        // Opción de respaldo si no detecta los iframes directamente debido a scripts de protección
         if (streams.length === 0) {
             streams.push({
-                title: 'Ver directamente en DoramasYT',
+                title: 'Ver el capítulo en el navegador (DoramasYT)',
                 externalUrl: targetUrl
             });
         }
@@ -141,5 +164,5 @@ app.get('/stream/:type/:id.json', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`Plugin activo en: http://localhost:${PORT}/manifest.json`);
+    console.log(`Servidor corriendo en puerto ${PORT}`);
 });
